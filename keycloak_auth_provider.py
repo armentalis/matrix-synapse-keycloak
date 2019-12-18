@@ -178,8 +178,19 @@ WHERE user_id = '{}'
                     realm_name=self.realm_name,
                     client_secret_key=self.secret_key)
 
+        # We can't separate current session and close all sessions off this user
+        # close keycloack sessions
         for refresh_token in res[0]:
             keycloak_openid.logout(refresh_token)
+
+        # close other sysnapse sessions
+        device_handler = self.account_handler.hs.get_device_handler()
+        yield device_handler.delete_all_devices_for_user(user_id)
+
+        # .. and then delete any access tokens which weren't associated with
+        # devices.
+        auth_handler = self.account_handler.hs.get_auth_handler()
+        yield auth_handler.delete_access_tokens_for_user(user_id)
 
         res = self.store.runInteraction("clear_keycloak_tokens", _clear_keycloak_tokens)
         defer.returnValue(True)
