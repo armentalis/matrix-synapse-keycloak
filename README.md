@@ -24,7 +24,9 @@ password_providers:
 ```
 
 secret_key
+
 ![secret_key](docs/img/secret_key.png)
 
 public_key
+
 ![public_key](docs/img/public_key.png)
