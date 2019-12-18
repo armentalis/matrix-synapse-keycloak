@@ -25,17 +25,18 @@ import json
 from pkg_resources import parse_version
 
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 
 
 logger = logging.getLogger(__name__)
 
 class KeycloakAuthProvider(object):
-    __version__ = "0.0.1"
+    __version__ = "0.0.2"
 
     def __init__(self, config, account_handler):
         self.account_handler = account_handler
+        self.store = self.account_handler.hs.get_datastore()
 
         self.url = config.url
         self.client_id = config.client_id
@@ -44,6 +45,19 @@ class KeycloakAuthProvider(object):
         self.public_key = config.public_key
         self.algorithm = config.algorithm
         self.profile_attrs = config.profile_attrs
+
+
+    def get_db_schema_files():
+        name = '001_create_keycloak_provider_tokens.sql'
+        stream = """CREATE TABLE IF NOT EXISTS keycloak_provider_tokens (
+  user_id TEXT NOT NULL,
+  last_jwt text,
+  refresh_tokens TEXT[] NOT NULL,
+  logged_in INT,
+  PRIMARY KEY (user_id)
+);
+        """.split("\n")
+        return [[name, stream]]
 
 
     @defer.inlineCallbacks
@@ -59,8 +73,6 @@ class KeycloakAuthProvider(object):
 
         localpart = user_id.split(":", 1)[0][1:]
         logger.info("! %s", localpart)
-        # login = localpart.split("@")[1]
-        # logger.info("! %s", login)
 
         keycloak_openid = KeycloakOpenID(server_url=self.url,
                     client_id=self.client_id,
@@ -80,7 +92,13 @@ class KeycloakAuthProvider(object):
         key = self.public_key
         if self.algorithm == 'RS256':
             key = '-----BEGIN PUBLIC KEY-----\n' + key + '\n-----END PUBLIC KEY-----'
-        token_info = keycloak_openid.decode_token(token['access_token'], key=key, algorithms=[self.algorithm], options=options)
+
+        token_info = keycloak_openid.decode_token(
+            token['access_token'],
+            key=key,
+            algorithms=[self.algorithm],
+            options=options
+        )
 
         if not (yield self.account_handler.check_user_exists(user_id)):
             logger.info("User %s does not exist yet, creating...", user_id)
@@ -94,6 +112,7 @@ class KeycloakAuthProvider(object):
             logger.info("User %s already exists, registration skipped", user_id)
 
         if bool(self.profile_attrs):
+            logger.info("profile attrs")
             store = yield self.account_handler.hs.get_profile_handler().store
             profile = {}
             for key, alias in self.profile_attrs.items():
@@ -104,18 +123,67 @@ class KeycloakAuthProvider(object):
             if display_name:
                 logger.info("Setting display name to '%s' based on profile data", display_name)
                 yield store.set_profile_displayname(localpart, display_name)
+            logger.info("end profile attrs")
+
             # TODO 3pids
         else:
             logger.info("No profile data")
 
+        def _save_keycloak_token(txn):
+            template = """
+INSERT INTO keycloak_provider_tokens
+(user_id, last_jwt, refresh_tokens)
+VALUES
+('{0}', '{1}', ARRAY['{2}'])
+ON CONFLICT (user_id) DO
+UPDATE SET
+last_jwt = '{1}',
+refresh_tokens = array_append(keycloak_provider_tokens.refresh_tokens, '{2}')
+"""
+            sql = template.format(user_id, json.dumps(token), token['refresh_token'])
+            txn.execute(sql)
+
+        self.store.runInteraction("save_keycloak_token", _save_keycloak_token)
+        logger.info("insert end")
         defer.returnValue(True)
 
 
     @defer.inlineCallbacks
     def on_logged_out(self, user_id, device_id, access_token):
         """Close session on keycloak server
-
         """
+
+        def _clear_keycloak_tokens(txn):
+            sql = """
+UPDATE keycloak_provider_tokens
+SET refresh_tokens = ARRAY[]::TEXT[],
+last_jwt = ''
+WHERE user_id = '{}'
+"""
+            txn.execute(sql.format(user_id))
+
+        def _get_refresh_tokens(txn):
+            sql = """
+SELECT refresh_tokens
+FROM keycloak_provider_tokens
+WHERE user_id = '{}'
+"""
+            txn.execute(sql.format(user_id))
+            return txn.fetchone()
+
+        res = yield self.store.runInteraction("get_refresh_tokens", _get_refresh_tokens)
+
+        keycloak_openid = KeycloakOpenID(server_url=self.url,
+                    client_id=self.client_id,
+                    realm_name=self.realm_name,
+                    client_secret_key=self.secret_key)
+
+        for refresh_token in res[0]:
+            keycloak_openid.logout(refresh_token)
+
+        res = self.store.runInteraction("clear_keycloak_tokens", _clear_keycloak_tokens)
+        defer.returnValue(True)
+
 
     @staticmethod
     def parse_config(config):
