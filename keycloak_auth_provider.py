@@ -51,7 +51,6 @@ class KeycloakAuthProvider(object):
         name = '001_create_keycloak_provider_tokens.sql'
         stream = """CREATE TABLE IF NOT EXISTS keycloak_provider_tokens (
   user_id TEXT NOT NULL,
-  last_jwt text,
   refresh_tokens TEXT[] NOT NULL,
   logged_in INT,
   PRIMARY KEY (user_id)
@@ -132,15 +131,14 @@ class KeycloakAuthProvider(object):
         def _save_keycloak_token(txn):
             template = """
 INSERT INTO keycloak_provider_tokens
-(user_id, last_jwt, refresh_tokens)
+(user_id, refresh_tokens)
 VALUES
-('{0}', '{1}', ARRAY['{2}'])
+('{0}', ARRAY['{1}'])
 ON CONFLICT (user_id) DO
 UPDATE SET
-last_jwt = '{1}',
-refresh_tokens = array_append(keycloak_provider_tokens.refresh_tokens, '{2}')
+refresh_tokens = array_append(keycloak_provider_tokens.refresh_tokens, '{1}')
 """
-            sql = template.format(user_id, json.dumps(token), token['refresh_token'])
+            sql = template.format(user_id, token['refresh_token'])
             txn.execute(sql)
 
         self.store.runInteraction("save_keycloak_token", _save_keycloak_token)
@@ -156,8 +154,7 @@ refresh_tokens = array_append(keycloak_provider_tokens.refresh_tokens, '{2}')
         def _clear_keycloak_tokens(txn):
             sql = """
 UPDATE keycloak_provider_tokens
-SET refresh_tokens = ARRAY[]::TEXT[],
-last_jwt = ''
+SET refresh_tokens = ARRAY[]::TEXT[]
 WHERE user_id = '{}'
 """
             txn.execute(sql.format(user_id))
